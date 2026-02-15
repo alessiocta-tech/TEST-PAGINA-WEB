@@ -36,6 +36,15 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
 });
+import https from "https";
+
+app.get("/api/my-ip", (_req, res) => {
+  https.get("https://api.ipify.org?format=json", (resp) => {
+    let data = "";
+    resp.on("data", chunk => data += chunk);
+    resp.on("end", () => res.send(data));
+  });
+});
 
 /* =========================
    API KEY
