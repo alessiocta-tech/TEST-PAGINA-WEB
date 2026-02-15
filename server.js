@@ -4,6 +4,7 @@ import rateLimit from "express-rate-limit";
 import mysql from "mysql2/promise";
 
 const app = express();
+
 app.use(express.json({ limit: "200kb" }));
 app.use(helmet());
 app.use(
@@ -15,6 +16,27 @@ app.use(
   })
 );
 
+/* =========================
+   CONFIGURAZIONE DATABASE
+========================= */
+
+const pool = mysql.createPool({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASS,
+  database: process.env.DB_NAME,
+  port: Number(process.env.DB_PORT ?? 3306),
+  ssl: {
+    rejectUnauthorized: false,
+  },
+  waitForConnections: true,
+  connectionLimit: 10,
+});
+
+/* =========================
+   API KEY CHECK
+========================= */
+
 function requireApiKey(req, res, next) {
   const apiKey = req.header("x-api-key");
   if (!apiKey || apiKey !== process.env.API_KEY) {
@@ -23,58 +45,79 @@ function requireApiKey(req, res, next) {
   next();
 }
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASS,
-  database: process.env.DB_NAME,
-  waitForConnections: true,
-  connectionLimit: 10,
+/* =========================
+   ROOT (evita Cannot GET /)
+========================= */
+
+app.get("/", (_req, res) => {
+  res.status(200).send("deRione API is running");
 });
+
+/* =========================
+   HEALTH CHECK
+========================= */
 
 app.get("/api/health", async (_req, res) => {
   try {
     await pool.query("SELECT 1");
     res.json({ ok: true, db: "ok" });
-  } catch {
-    res.status(500).json({ ok: false, db: "down" });
+  } catch (e) {
+    res.status(500).json({
+      ok: false,
+      db: "down",
+      code: e?.code ?? null,
+      message: e?.message ?? String(e),
+    });
   }
 });
 
-// Lista prenotazioni (ristorante + data)
+/* =========================
+   LISTA PRENOTAZIONI
+========================= */
+
 app.get("/api/reservations", requireApiKey, async (req, res) => {
   const { restaurant_id, date } = req.query;
+
   if (!restaurant_id || !date) {
     return res.status(400).json({ error: "missing_params" });
   }
 
-  const [rows] = await pool.execute(
-    `SELECT
-      ID, PRistorante, DataPren, OraPren, Nome, Cognome, Telefono, Email,
-      Coperti, Seggiolini, Fonte, Stato, Nota, Prezzo, Tavolo, PCliente, CodeID,
-      Voto, Commento, DataReg, DataUpd
-     FROM Prenotazioni
-     WHERE PRistorante = ? AND DataPren = ?
-     ORDER BY OraPren ASC`,
-    [Number(restaurant_id), date]
-  );
+  try {
+    const [rows] = await pool.execute(
+      `SELECT 
+        ID, PRistorante, DataPren, OraPren, Nome, Cognome,
+        Telefono, Email, Coperti, Seggiolini,
+        Fonte, Stato, Nota, Prezzo, Tavolo,
+        PCliente, CodeID, Voto, Commento,
+        DataReg, DataUpd
+       FROM Prenotazioni
+       WHERE PRistorante = ? AND DataPren = ?
+       ORDER BY OraPren ASC`,
+      [Number(restaurant_id), date]
+    );
 
-  res.json({ items: rows });
+    res.json({ items: rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// Crea prenotazione
+/* =========================
+   CREA PRENOTAZIONE
+========================= */
+
 app.post("/api/reservations", requireApiKey, async (req, res) => {
   const {
     restaurant_id,
-    date,         // YYYY-MM-DD
-    time,         // HH:MM
+    date,
+    time,
     first_name,
     last_name = "",
     phone,
     email = "",
     covers,
     seggiolini = 0,
-    fonte = "elevenlabs",
+    fonte = "API",
     stato = "CONFERMATA",
     nota = "",
     prezzo = 0.0,
@@ -86,60 +129,51 @@ app.post("/api/reservations", requireApiKey, async (req, res) => {
   if (!restaurant_id || !date || !time || !first_name || !phone || !covers) {
     return res.status(400).json({ error: "missing_fields" });
   }
-  port: Number(process.env.DB_PORT ?? 3306),
 
+  try {
+    const [result] = await pool.execute(
+      `INSERT INTO Prenotazioni
+        (PRistorante, DataPren, OraPren, Nome, Cognome,
+         Telefono, Email, Coperti, Seggiolini,
+         Fonte, Stato, Nota, Prezzo, Tavolo,
+         PCliente, CodeID)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        Number(restaurant_id),
+        date,
+        `${time}:00`,
+        first_name.trim(),
+        last_name.trim(),
+        phone.trim(),
+        email.trim(),
+        Number(covers),
+        Number(seggiolini),
+        fonte,
+        stato,
+        nota,
+        Number(prezzo),
+        tavolo,
+        Number(pcliente),
+        code_id,
+      ]
+    );
 
-  // Normalizzazioni minime
-  const oraPren = `${time}:00`; // TIME
-  const payload = {
-    PRistorante: Number(restaurant_id),
-    DataPren: date,
-    OraPren: oraPren,
-    Nome: String(first_name).trim(),
-    Cognome: String(last_name).trim(),
-    Telefono: String(phone).trim(),
-    Email: String(email ?? "").trim(),
-    Coperti: Number(covers),
-    Seggiolini: Number(seggiolini),
-    Fonte: String(fonte).slice(0, 15),
-    Stato: String(stato).slice(0, 15),
-    Nota: String(nota).slice(0, 500),
-    Prezzo: Number(prezzo),
-    Tavolo: String(tavolo).slice(0, 5),
-    PCliente: Number(pcliente),
-    CodeID: String(code_id).slice(0, 50),
-  };
-
-  const [result] = await pool.execute(
-    `INSERT INTO Prenotazioni
-     (PRistorante, DataPren, OraPren, Nome, Cognome, Telefono, Email, Coperti, Seggiolini,
-      Fonte, Stato, Nota, Prezzo, Tavolo, PCliente, CodeID)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      payload.PRistorante,
-      payload.DataPren,
-      payload.OraPren,
-      payload.Nome,
-      payload.Cognome,
-      payload.Telefono,
-      payload.Email,
-      payload.Coperti,
-      payload.Seggiolini,
-      payload.Fonte,
-      payload.Stato,
-      payload.Nota,
-      payload.Prezzo,
-      payload.Tavolo,
-      payload.PCliente,
-      payload.CodeID,
-    ]
-  );
-
-  res.status(201).json({
-    id: result.insertId,
-    ...payload,
-  });
+    res.status(201).json({
+      id: result.insertId,
+      message: "Reservation created",
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
+/* =========================
+   START SERVER
+========================= */
+
 const port = Number(process.env.PORT ?? 3000);
-app.listen(port, () => console.log(`API listening on :${port}`));
+
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
+
