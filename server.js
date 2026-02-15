@@ -15,7 +15,28 @@ app.use(
     legacyHeaders: false,
   })
 );
+import net from "net";
 
+app.get("/api/tcp-test", async (_req, res) => {
+  const host = process.env.DB_HOST;
+  const port = Number(process.env.DB_PORT ?? 3306);
+
+  const socket = new net.Socket();
+  const timeoutMs = 6000;
+
+  const done = (payload) => {
+    try { socket.destroy(); } catch {}
+    res.json(payload);
+  };
+
+  socket.setTimeout(timeoutMs);
+
+  socket.on("connect", () => done({ ok: true, host, port, tcp: "open" }));
+  socket.on("timeout", () => done({ ok: false, host, port, tcp: "timeout" }));
+  socket.on("error", (e) => done({ ok: false, host, port, tcp: "error", code: e.code, message: e.message }));
+
+  socket.connect(port, host);
+});
 /* =========================
    DATABASE CONNECTION
 ========================= */
