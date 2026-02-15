@@ -86,6 +86,8 @@ app.post("/api/reservations", requireApiKey, async (req, res) => {
   if (!restaurant_id || !date || !time || !first_name || !phone || !covers) {
     return res.status(400).json({ error: "missing_fields" });
   }
+  port: Number(process.env.DB_PORT ?? 3306),
+
 
   // Normalizzazioni minime
   const oraPren = `${time}:00`; // TIME
