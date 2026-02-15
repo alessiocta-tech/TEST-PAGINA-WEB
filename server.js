@@ -3,16 +3,17 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import mysql from "mysql2/promise";
 import net from "net";
+import https from "https";
 
 const app = express();
 
-// IMPORTANTISSIMO su Railway (proxy davanti)
+// Railway usa un proxy davanti (X-Forwarded-For)
 app.set("trust proxy", 1);
 
 app.use(express.json({ limit: "200kb" }));
 app.use(helmet());
 
-// Rate limit (ora non rompe più)
+// Rate limit
 app.use(
   rateLimit({
     windowMs: 60_000,
@@ -36,19 +37,11 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
 });
-import https from "https";
-
-app.get("/api/my-ip", (_req, res) => {
-  https.get("https://api.ipify.org?format=json", (resp) => {
-    let data = "";
-    resp.on("data", chunk => data += chunk);
-    resp.on("end", () => res.send(data));
-  });
-});
 
 /* =========================
    API KEY
 ========================= */
+
 function requireApiKey(req, res, next) {
   const apiKey = req.header("x-api-key");
   if (!apiKey || apiKey !== process.env.API_KEY) {
@@ -63,7 +56,24 @@ function requireApiKey(req, res, next) {
 
 app.get("/", (_req, res) => res.status(200).send("deRione API running"));
 
-app.get("/api/tcp-test", async (_req, res) => {
+/**
+ * IP pubblico di uscita del container (utile per whitelist SiteGround)
+ */
+app.get("/api/my-ip", (_req, res) => {
+  const r = https.get("https://api.ipify.org?format=json", (resp) => {
+    let data = "";
+    resp.on("data", (chunk) => (data += chunk));
+    resp.on("end", () => res.type("json").send(data));
+  });
+
+  r.on("error", (e) => res.status(500).json({ error: e.message }));
+  r.setTimeout(5000, () => r.destroy(new Error("timeout")));
+});
+
+/**
+ * Test puro TCP verso DB_HOST:DB_PORT (NON fa login MySQL)
+ */
+app.get("/api/tcp-test", (_req, res) => {
   const host = process.env.DB_HOST;
   const port = Number(process.env.DB_PORT ?? 3306);
 
@@ -71,18 +81,32 @@ app.get("/api/tcp-test", async (_req, res) => {
   const timeoutMs = 6000;
 
   const done = (payload) => {
-    try { socket.destroy(); } catch {}
+    try {
+      socket.destroy();
+    } catch {}
     res.json(payload);
   };
 
   socket.setTimeout(timeoutMs);
   socket.on("connect", () => done({ ok: true, host, port, tcp: "open" }));
   socket.on("timeout", () => done({ ok: false, host, port, tcp: "timeout" }));
-  socket.on("error", (e) => done({ ok: false, host, port, tcp: "error", code: e.code, message: e.message }));
+  socket.on("error", (e) =>
+    done({
+      ok: false,
+      host,
+      port,
+      tcp: "error",
+      code: e?.code ?? null,
+      message: e?.message ?? null,
+    })
+  );
 
   socket.connect(port, host);
 });
 
+/**
+ * Test MySQL (fa query SELECT 1)
+ */
 app.get("/api/health", async (_req, res) => {
   try {
     await pool.query("SELECT 1");
@@ -97,21 +121,39 @@ app.get("/api/health", async (_req, res) => {
   }
 });
 
+/**
+ * Lista prenotazioni per ristorante e data
+ * GET /api/reservations?restaurant_id=1&date=2024-11-19
+ */
 app.get("/api/reservations", requireApiKey, async (req, res) => {
   const { restaurant_id, date } = req.query;
-  if (!restaurant_id || !date) return res.status(400).json({ error: "missing_params" });
 
-  const [rows] = await pool.execute(
-    `SELECT *
-     FROM Prenotazioni
-     WHERE PRistorante = ? AND DataPren = ?
-     ORDER BY OraPren ASC`,
-    [Number(restaurant_id), date]
-  );
+  if (!restaurant_id || !date) {
+    return res.status(400).json({ error: "missing_params" });
+  }
 
-  res.json({ items: rows });
+  try {
+    const [rows] = await pool.execute(
+      `SELECT *
+       FROM Prenotazioni
+       WHERE PRistorante = ? AND DataPren = ?
+       ORDER BY OraPren ASC`,
+      [Number(restaurant_id), date]
+    );
+
+    res.json({ items: rows });
+  } catch (e) {
+    res.status(500).json({
+      error: "db_error",
+      code: e?.code ?? null,
+      message: e?.message ?? null,
+    });
+  }
 });
 
+/**
+ * Crea prenotazione
+ */
 app.post("/api/reservations", requireApiKey, async (req, res) => {
   const {
     restaurant_id,
@@ -136,35 +178,47 @@ app.post("/api/reservations", requireApiKey, async (req, res) => {
     return res.status(400).json({ error: "missing_fields" });
   }
 
-  const [result] = await pool.execute(
-    `INSERT INTO Prenotazioni
-      (PRistorante, DataPren, OraPren, Nome, Cognome,
-       Telefono, Email, Coperti, Seggiolini,
-       Fonte, Stato, Nota, Prezzo, Tavolo,
-       PCliente, CodeID)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      Number(restaurant_id),
-      date,
-      `${time}:00`,
-      first_name.trim(),
-      last_name.trim(),
-      phone.trim(),
-      email.trim(),
-      Number(covers),
-      Number(seggiolini),
-      fonte,
-      stato,
-      nota,
-      Number(prezzo),
-      tavolo,
-      Number(pcliente),
-      code_id,
-    ]
-  );
+  try {
+    const [result] = await pool.execute(
+      `INSERT INTO Prenotazioni
+        (PRistorante, DataPren, OraPren, Nome, Cognome,
+         Telefono, Email, Coperti, Seggiolini,
+         Fonte, Stato, Nota, Prezzo, Tavolo,
+         PCliente, CodeID)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        Number(restaurant_id),
+        date,
+        `${time}:00`,
+        String(first_name).trim(),
+        String(last_name).trim(),
+        String(phone).trim(),
+        String(email).trim(),
+        Number(covers),
+        Number(seggiolini),
+        String(fonte),
+        String(stato),
+        String(nota),
+        Number(prezzo),
+        String(tavolo),
+        Number(pcliente),
+        String(code_id),
+      ]
+    );
 
-  res.status(201).json({ id: result.insertId, message: "Reservation created" });
+    res.status(201).json({ id: result.insertId, message: "Reservation created" });
+  } catch (e) {
+    res.status(500).json({
+      error: "db_error",
+      code: e?.code ?? null,
+      message: e?.message ?? null,
+    });
+  }
 });
+
+/* =========================
+   START SERVER
+========================= */
 
 const port = Number(process.env.PORT ?? 8080);
 app.listen(port, () => console.log(`Server running on port ${port}`));
