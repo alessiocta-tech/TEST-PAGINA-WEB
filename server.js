@@ -17,7 +17,7 @@ app.use(
 );
 
 /* =========================
-   CONFIGURAZIONE DATABASE
+   DATABASE CONNECTION
 ========================= */
 
 const pool = mysql.createPool({
@@ -26,15 +26,11 @@ const pool = mysql.createPool({
   password: process.env.DB_PASS,
   database: process.env.DB_NAME,
   port: Number(process.env.DB_PORT ?? 3306),
-  ssl: {
-    rejectUnauthorized: false,
-  },
-  waitForConnections: true,
-  connectionLimit: 10,
+  connectTimeout: 10000
 });
 
 /* =========================
-   API KEY CHECK
+   API KEY MIDDLEWARE
 ========================= */
 
 function requireApiKey(req, res, next) {
@@ -46,11 +42,11 @@ function requireApiKey(req, res, next) {
 }
 
 /* =========================
-   ROOT (evita Cannot GET /)
+   ROOT
 ========================= */
 
 app.get("/", (_req, res) => {
-  res.status(200).send("deRione API is running");
+  res.status(200).send("deRione API running");
 });
 
 /* =========================
@@ -66,13 +62,13 @@ app.get("/api/health", async (_req, res) => {
       ok: false,
       db: "down",
       code: e?.code ?? null,
-      message: e?.message ?? String(e),
+      message: e?.message ?? null
     });
   }
 });
 
 /* =========================
-   LISTA PRENOTAZIONI
+   LIST RESERVATIONS
 ========================= */
 
 app.get("/api/reservations", requireApiKey, async (req, res) => {
@@ -84,12 +80,7 @@ app.get("/api/reservations", requireApiKey, async (req, res) => {
 
   try {
     const [rows] = await pool.execute(
-      `SELECT 
-        ID, PRistorante, DataPren, OraPren, Nome, Cognome,
-        Telefono, Email, Coperti, Seggiolini,
-        Fonte, Stato, Nota, Prezzo, Tavolo,
-        PCliente, CodeID, Voto, Commento,
-        DataReg, DataUpd
+      `SELECT *
        FROM Prenotazioni
        WHERE PRistorante = ? AND DataPren = ?
        ORDER BY OraPren ASC`,
@@ -103,7 +94,7 @@ app.get("/api/reservations", requireApiKey, async (req, res) => {
 });
 
 /* =========================
-   CREA PRENOTAZIONE
+   CREATE RESERVATION
 ========================= */
 
 app.post("/api/reservations", requireApiKey, async (req, res) => {
@@ -154,14 +145,15 @@ app.post("/api/reservations", requireApiKey, async (req, res) => {
         Number(prezzo),
         tavolo,
         Number(pcliente),
-        code_id,
+        code_id
       ]
     );
 
     res.status(201).json({
       id: result.insertId,
-      message: "Reservation created",
+      message: "Reservation created"
     });
+
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -176,4 +168,3 @@ const port = Number(process.env.PORT ?? 3000);
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
-
